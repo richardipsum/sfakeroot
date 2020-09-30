@@ -1,0 +1,42 @@
+.Dd 2020-09-30
+.Dt sfakeroot 1
+.Sh NAME
+.Nm sfakeroot
+.Nd manipulate files with faked root privileges
+.Sh SYNOPSIS
+.Nm
+.Op Ar command
+.Sh DESCRIPTION
+.Nm
+runs
+.Ar command
+within an environment that has faked root privileges. If
+.Ar command
+is not specified then by default the shell specified by the SHELL environment
+variable is used as the command, if SHELL is unset then /bin/sh is used instead.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl f Ar file
+Use
+.Ar file
+to initialise session state. On exit the session file is updated with
+the current state of the session. This can be used to preserve the session
+state between invocations of
+.Nm .
+.It Fl F Ar file
+Same as -f but exit if session cannot be loaded from
+.Ar file
+at startup.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width "1-125"
+.It 126
+.Ar command
+was found but was not executable.
+.It 127
+.Ar command
+was not found.
+.El
+.Pp
+Otherwise sfakeroot returns the exit status of
+.Ar command .

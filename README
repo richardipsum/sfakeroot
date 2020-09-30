@@ -1,0 +1,63 @@
+sfakeroot
+=========
+
+sfakeroot is a minimalist fakeroot[1]. It uses the same LD_PRELOAD tricks
+as fakeroot to provide an environment in which stat() and related calls
+return uid/gid 0, so that files appear to be owned by root even when they're
+not. Inside the fakeroot environment permissions can be modified as if the
+current user is root, though ownership of the underlying files is never
+really changed. Any permissions set within the fakeroot environment will
+last only for the duration of the session, once sfakeroot exits all changes
+are lost.
+
+Why?
+----
+
+sfakeroot was written because there is no OpenBSD compatible fakeroot
+equivalent, I considered porting fakeroot but it seemed too difficult.
+
+Installation
+------------
+
+To build just run:
+
+    $ make
+
+followed by (as root),
+
+    # make install
+
+to install to standard locations.
+
+You can also uninstall with (as root),
+
+    # make uninstall
+
+Contributing
+------------
+
+Please feel welcome to submit patches and bug reports via email
+to my public-inbox ~richardipsum/public-inbox@lists.sr.ht
+alternatively patches may be submitted in private using the address
+found in the git log.
+
+See https://git-send-email.io/ for details on contributing
+via email with git.
+
+The archive of my public-inbox can be found at
+https://lists.sr.ht/~richardipsum/public-inbox.
+
+Known issues
+------------
+
+Since OpenBSD's base utils are statically linked sfakeroot may be less
+useful on OpenBSD than it is on Linux, since the LD_PRELOAD tricks only
+work with dynamically linked executables. Even with dynamically linked
+executables sfakeroot may be of limited use for any programs using pledge(),
+since sfakeroot may try to make use of syscalls not specified in the pledge()
+call thereby causing sfakeroot to be terminated with SIGABRT.
+
+To make better use of sfakeroot on OpenBSD you may wish to use it with sbase[2].
+
+[1]: http://freshmeat.sourceforge.net/projects/fakeroot
+[2]: https://git.suckless.org/sbase/
