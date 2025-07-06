@@ -1,6 +1,6 @@
 /* sfakeroot: manipulate files faking root privileges
  *
- * Copyright © 2020 Richard Ipsum
+ * Copyright © 2020 - 2025 Richard Ipsum
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -15,6 +15,9 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
  */
+
+#include <syslog.h>
+#include <stdarg.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,6 +34,7 @@
 #include <sys/un.h>
 #include <signal.h>
 
+#include "sfakeroot_inline.h"
 #include "sfakeroot.h"
 
 #include <sys/syscall.h>
@@ -39,11 +43,6 @@
 #define SONAME "libsfakeroot.so"
 
 #ifdef __linux__
-#ifndef __x86_64__
-#error "Architectures other than amd64 are not supported on Linux"
-#endif
-/*./x86_64-linux-gnu/asm/unistd_64.h:#define __NR_newfstatat 262 */
-#define SYS_fstatat 262
 #define SESSION_FILE_LINE_FMT "%lu,%u,%u,%u\n"
 #else
 #define SESSION_FILE_LINE_FMT "%llu,%u,%u,%u\n"
@@ -69,13 +68,6 @@ struct cmdline_arguments {
     size_t args_len;
 };
 
-static void xsend(int sockfd, struct sfakeroot_msg *m)
-{
-    if (sfakeroot_sendmsg(sockfd, m) == -1) {
-        exit(1);
-    }
-}
-
 static struct sfakeroot_ent *lookupent(struct sfakeroot_list *list, ino_t st_ino)
 {
     for (struct sfakeroot_ent *e = list->first; e != NULL; e = e->next) {
@@ -85,6 +77,7 @@ static struct sfakeroot_ent *lookupent(struct sfakeroot_list *list, ino_t st_ino
         }
     }
 
+    debug("lookupent returning NULL\n");
     return NULL;
 }
 
@@ -98,7 +91,7 @@ static struct sfakeroot_ent *addent(struct sfakeroot_list *list,
         return NULL;
     }
 
-    debug("add ent: %llu\n", s->st_ino);
+    debug("add ent: %llu has mode %o\n", s->st_ino, s->st_mode);
 
     ent->stale = stale;
     ent->next = NULL;
@@ -118,102 +111,76 @@ out:
     return ent;
 }
 
-static int real_stat_internal(int fd, const char *path, struct stat *sb,
-                              int flag, const char *working_dir, int *errno_out,
-                              int sysno)
-{
-    int cwdfd, ret;
-    DIR *cwd = opendir(".");
-
-    if (cwd == NULL) {
-        *errno_out = errno;
-        return -1;
-    }
-
-    debug("chdir %s\n", working_dir);
-    cwdfd = dirfd(cwd);
-    if (chdir(working_dir) == -1) {
-        *errno_out = errno;
-        closedir(cwd);
-        return -1;
-    }
-
-    debug("do syscall\n");
-    switch (sysno) {
-        case SYS_fstatat:
-            ret = syscall(sysno, fd, path, sb, flag);
-            break;
-        case SYS_stat:
-        case SYS_lstat:
-            ret = syscall(sysno, path, sb);
-            break;
-        default:
-            ret = -1;
-            errno = EINVAL;
-            break;
-    }
-
-    *errno_out = errno;
-    fchdir(cwdfd);
-    closedir(cwd);
-    return ret;
-}
-
-static int real_stat(const char *path, struct stat *sb, bool islstat,
-                     char *working_dir, int *errno_out)
-{
-    int sysno = islstat ? SYS_lstat : SYS_stat;
-    return real_stat_internal(-1, path, sb, 0, working_dir, errno_out, sysno);
-}
-
-static int real_fstatat(int fd, const char *path, struct stat *sb, int flag,
-                        const char *working_dir, int *errno_out)
-{
-    return real_stat_internal(fd, path, sb, flag, working_dir,
-                              errno_out, SYS_fstatat);
-}
-
-static int real_fstat(int fd, struct stat *sb, int *errno_out)
-{
-    int ret = syscall(SYS_fstat, fd, sb);
-    *errno_out = errno;
-    return ret;
-}
-
 static void handle_stat(struct sfakeroot_msg *m)
 {
     struct sfakeroot_ent *ent;
     int errno_sv = 0;
+    int cwdfd;
+    ino_t inode;
+    DIR *cwd = opendir(".");
 
-    debug("handle_fstat\n");
+    if (cwd == NULL) {
+        m->retcode = -1;
+        return;
+    }
+    cwdfd = dirfd(cwd);
+    if (chdir(m->working_dir) == -1) {
+        closedir(cwd);
+        m->retcode = -1;
+        return;
+    }
 
     switch (m->type) {
         case SFAKEROOT_MSG_FSTAT:
-            m->retcode = real_fstat(m->fd, &m->st, &errno_sv);
+            syslog(LOG_WARNING, "handle_fstat fd: %d working dir: %s\n", m->fd, m->working_dir);
+            m->retcode = fstat(m->fd, &m->st);
+            inode = m->st.st_ino;
+            errno_sv = errno;
             break;
         case SFAKEROOT_MSG_STAT:
+            syslog(LOG_WARNING, "handle_stat path: %s, working dir: %s\n", m->path, m->working_dir);
+            m->retcode = stat(m->path, &m->st);
+            inode = m->st.st_ino;
+            errno_sv = errno;
+            break;
         case SFAKEROOT_MSG_LSTAT:
-            m->retcode = real_stat(m->path, &m->st,
-                                   m->type == SFAKEROOT_MSG_LSTAT,
-                                   m->working_dir, &errno_sv);
+            syslog(LOG_WARNING, "handle_lstat path: %s, working dir: %s\n", m->path, m->working_dir);
+            m->retcode = lstat(m->path, &m->st);
+            inode = m->st.st_ino;
+            errno_sv = errno;
             break;
         case SFAKEROOT_MSG_FSTATAT:
-            m->retcode = real_fstatat(m->fd, m->path, &m->st, m->flag,
-                                      m->working_dir, &errno_sv);
+            m->retcode = fstatat(m->fd, m->path, &m->st, m->flag);
+            inode = m->st.st_ino;
+            errno_sv = errno;
             break;
+#if USE_STATX
+        case SFAKEROOT_MSG_STATX:
+            syslog(LOG_WARNING, "handle_statx path: %s, working dir: %s\n", m->path, m->working_dir);
+            m->retcode = statx(m->fd, m->path, m->flag, m->mask, &m->statxbuf);
+            inode = m->statxbuf.stx_ino;
+            errno_sv = errno;
+            break;
+#endif
         default:
             debug("non stat message in handle_stat\n");
-            return;
+            goto cleanup;
     }
 
     if (m->retcode != 0) {
         m->reterrno = errno_sv;
-        return;
+        goto cleanup;
     }
 
-    if ((ent = lookupent(&ents, m->st.st_ino)) != NULL) {
+    if ((ent = lookupent(&ents, inode)) != NULL) {
+        debug("lookupent returned ent for inode %d, has st_mode: %o\n", inode, ent->st.st_mode);
         if (ent->stale) {
             /* update the entry with the new stat data */
+#if USE_STATX
+            m->statxbuf.stx_uid = ent->st.st_uid;
+            m->statxbuf.stx_gid = ent->st.st_gid;
+            m->statxbuf.stx_mode = ent->st.st_mode;
+#endif
             m->st.st_uid = ent->st.st_uid;
             m->st.st_gid = ent->st.st_gid;
             m->st.st_mode = ent->st.st_mode;
@@ -221,80 +188,120 @@ static void handle_stat(struct sfakeroot_msg *m)
             ent->stale = false;
         }
         else {
+#if USE_STATX
+            m->statxbuf.stx_uid = ent->st.st_uid;
+            m->statxbuf.stx_gid = ent->st.st_gid;
+            m->statxbuf.stx_mode = ent->st.st_mode;
+#endif
             m->st = ent->st;
         }
         if ((int) m->st.st_uid == -1) {
             m->st.st_uid = 0;
+#if USE_STATX
+            m->statxbuf.stx_uid = 0;
+#endif
         }
         if ((int) m->st.st_gid == -1) {
             m->st.st_gid = 0;
+#if USE_STATX
+            m->statxbuf.stx_gid = 0;
+#endif
         }
-        return;
+
+        goto cleanup;
     }
 
     m->st.st_uid = 0;
     m->st.st_gid = 0;
+#if USE_STATX
+    m->statxbuf.stx_uid = 0;
+    m->statxbuf.stx_gid = 0;
+#endif
+
+cleanup:
+    fchdir(cwdfd);
+    closedir(cwd);
 }
 
 static void handle_perms_change(struct sfakeroot_msg *m)
 {
-    struct stat s;
+    struct stat s = {0};
     int errno_sv;
+    int cwdfd;
     struct sfakeroot_ent *ent;
+    DIR *cwd = opendir(".");
+
+    if (cwd == NULL) {
+        m->retcode = -1;
+        return;
+    }
+    cwdfd = dirfd(cwd);
+    if (chdir(m->working_dir) == -1) {
+        closedir(cwd);
+        m->retcode = -1;
+        return;
+    }
 
     debug("handle_perms_change: m->path: %s, m->working_dir: %s\n",
           m->path, m->working_dir);
 
     switch (m->type) {
         case SFAKEROOT_MSG_LCHOWN:
-            m->retcode = real_stat(m->path, &s, true, m->working_dir, &errno_sv);
+            m->retcode = lstat(m->path, &s);
+            errno_sv = errno;
             break;
         case SFAKEROOT_MSG_CHOWN:
         case SFAKEROOT_MSG_CHMOD:
-            m->retcode = real_stat(m->path, &s, false, m->working_dir, &errno_sv);
+            m->retcode = stat(m->path, &s);
+            errno_sv = errno;
             break;
         case SFAKEROOT_MSG_FCHOWNAT:
-            m->retcode = real_fstatat(m->fd, m->path, &s, m->flag,
-                                      m->working_dir, &errno_sv);
+            m->retcode = fstatat(m->fd, m->path, &s, m->flag);
+            errno_sv = errno;
             break;
         case SFAKEROOT_MSG_FCHOWN:
-            m->retcode = real_fstat(m->fd, &s, &errno_sv);
+            m->retcode = fstat(m->fd, &s);
+            errno_sv = errno;
             break;
         default:
             debug("non chown/chmod message in handle_perms_change\n");
-            return;
+            goto cleanup;
     }
 
     if (m->retcode == -1) {
         debug("stat returned error\n");
         m->reterrno = errno_sv;
-        return;
+        goto cleanup;
     }
 
     /* path exists */
     switch (m->type) {
         case SFAKEROOT_MSG_LCHOWN:
         case SFAKEROOT_MSG_CHOWN:
+        case SFAKEROOT_MSG_FCHOWN:
         case SFAKEROOT_MSG_FCHOWNAT:
             s.st_uid = m->uid;
             s.st_gid = m->gid;
             break;
         case SFAKEROOT_MSG_CHMOD:
+            debug("setting mode %o\n", m->mode);
             s.st_mode = (s.st_mode & S_IFMT) | m->mode;
             break;
         default:
             debug("non chown/chmod message in handle_perms_change\n");
-            return;
+            goto cleanup;
     }
 
     if ((ent = lookupent(&ents, s.st_ino)) != NULL) {
         uid_t u = ent->st.st_uid;
         gid_t g = ent->st.st_gid;
+        mode_t md = ent->st.st_mode;
         ent->st = s;
         ent->st.st_uid = ((int) m->uid == -1) ? u : m->uid;
         ent->st.st_gid = ((int) m->gid == -1) ? g : m->gid;
+        ent->st.st_mode = m->mode ? m->mode : md;
         m->retcode = 0;
-        return;
+        goto cleanup;
     }
 
     s.st_uid = m->uid;
@@ -303,10 +310,14 @@ static void handle_perms_change(struct sfakeroot_msg *m)
     if (addent(&ents, &s, false) == NULL) {
         m->reterrno = ENOMEM;
         m->retcode = -1;
-        return;
+        goto cleanup;
     }
 
     m->retcode = 0;
+
+cleanup:
+    fchdir(cwdfd);
+    closedir(cwd);
 }
 
 /* listen for new connections */
@@ -454,6 +465,13 @@ static int sfakeroot_load_session_from_file(const struct cmdline_arguments *args
     return 0;
 }
 
+bool sfakeroot_daemon_running(void)
+{
+    int sockfd = sfakeroot__session_open_internal(false);
+    close(sockfd);
+    return sockfd != -1;
+}
+
 static void sfakeroot_server(int pipewfd, const char *session_socket_path,
                              const struct cmdline_arguments *args)
 {
@@ -476,22 +494,30 @@ static void sfakeroot_server(int pipewfd, const char *session_socket_path,
 
     for (;;) {
         struct sfakeroot_msg m;
+        debug("waiting for connection...\n");
+        debug("%d\n", getpid());
+        debug("getenv(LD_PRELOAD): ");
 
         sock = accept(listen_sock, (struct sockaddr *) &sa, &namelen);
         if (sock == -1) {
             fprintf(stderr, "%s: accept: %s\n", argv0, strerror(errno));
             exit(1);
         }
+        debug("connection accepted\n");
+        debug("waiting for message\n");
         if (sfakeroot_recvmsg(sock, &m) == -1) {
             fprintf(stderr, "eof?\n");
             continue;
         }
 
+        syslog(LOG_WARNING, "message type: %u\n", m.type);
         switch (m.type) {
             case SFAKEROOT_MSG_FSTAT:
             case SFAKEROOT_MSG_LSTAT:
             case SFAKEROOT_MSG_STAT:
             case SFAKEROOT_MSG_FSTATAT:
+            case SFAKEROOT_MSG_STATX:
+                syslog(LOG_WARNING, "doing the fake stat\n");
                 handle_stat(&m);
                 break;
             case SFAKEROOT_MSG_CHOWN:
@@ -509,7 +535,9 @@ static void sfakeroot_server(int pipewfd, const char *session_socket_path,
                 }
                 exit(0);
         }
-        xsend(sock, &m);
+        if (sfakeroot_sendmsg(sock, &m, NULL, 0) == -1) {
+            exit(1);
+        }
         close(sock);
     }
 }
@@ -531,6 +559,7 @@ static int sfakeroot_daemon(const char *session_socket_path,
         case 0:
             /* child */
             close(pipefds[0]); /* close read end */
+            debug("starting daemon...\n");
             if (daemon(1, 1) == -1) {
                 fprintf(stderr, "%s: failed to daemonise: %s\n",
                         argv0, strerror(errno));
@@ -568,7 +597,7 @@ static int sfakeroot_daemon(const char *session_socket_path,
 
 int sfakeroot_session_open(void);
 
-static int setenvvars(const char *session_socket_path)
+static int setpreload(void)
 {
     char *wd = SFAKEROOT_LIBDIR, *path = NULL;
     size_t len;
@@ -576,24 +605,18 @@ static int setenvvars(const char *session_socket_path)
     len = snprintf(NULL, 0, "%s/%s", wd, SONAME);
     path = malloc(len + 1);
     if (path == NULL) {
-        goto error;
+        fprintf(stderr, "%s: malloc: %s\n", argv0, strerror(errno));
+        return -1;
     }
     snprintf(path, len + 1, "%s/%s", wd, SONAME);
 
     if (setenv("LD_PRELOAD", path, 1) == -1) {
-        goto error;
+        fprintf(stderr, "%s: setenv: %s\n", argv0, strerror(errno));
+        free(path);
+        return -1;
     }
     free(path);
-
-    if (setenv("SFAKEROOT_SOCKET_PATH", session_socket_path, 1) == -1) {
-        goto error;
-    }
-
     return 0;
-
-error:
-    fprintf(stderr, "%s: setenv: %s\n", argv0, strerror(errno));
-    return -1;
 }
 
 static void usage(void)
@@ -660,22 +683,29 @@ int main(int argc, char *argv[])
         exit_status = 1;
         goto cleanup;
     }
-
-    if (setenvvars(session_socket_path) == -1) {
+    if (setenv("SFAKEROOT_SOCKET_PATH", session_socket_path, 1) == -1) {
+        fprintf(stderr, "%s: setenv: %s\n", argv0, strerror(errno));
         exit_status = 1;
         goto cleanup;
     }
-
     if (!sfakeroot_daemon_running()) {
         if (sfakeroot_daemon(session_socket_path, &args) == -1) {
             exit_status = 1;
             goto cleanup;
         }
     }
-
     exec_argvp = args.args_len > 0 ? args.args : sargv;
     switch (pid = fork()) {
         case 0:
+            // This child process is going to be our session
+            // i.e. shell or whatever program we were asked to run
+            // we need to set LD_PRELOAD for this process so that
+            // we can intercept the 'stat' calls and redirect them
+            // to the sfakeroot daemon.
+            if (setpreload() == -1) {
+                exit_status = 1;
+                goto cleanup;
+            }
             execvp(exec_argvp[0], exec_argvp);
             fprintf(stderr, "%s: exec `%s': %s\n",
                     argv0, exec_argvp[0], strerror(errno));
@@ -704,7 +734,7 @@ int main(int argc, char *argv[])
                 exit_status = 1;
                 goto cleanup;
             }
-            if (sfakeroot_sendmsg(sockfd, &m) == -1) {
+            if (sfakeroot_sendmsg(sockfd, &m, NULL, 0) == -1) {
                 exit_status = 1;
                 goto cleanup;
             }

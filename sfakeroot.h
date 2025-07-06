@@ -1,6 +1,6 @@
 /* sfakeroot
  *
- * Copyright © 2020 Richard Ipsum
+ * Copyright © 2020 - 2025 Richard Ipsum
  *
  * This file is part of sfakeroot.
  *
@@ -20,10 +20,17 @@
 #pragma once
 
 #include <stdarg.h>
+#include <stdbool.h>
 #include <sys/stat.h>
 
 #define SOCK_PATH ".sfakeroot_socket"
 #define MAX_PATHLEN 8192
+
+#if defined(HAVE_STATX) && HAVE_STATX && defined(__linux__)
+    #define USE_STATX 1
+#else
+    #define USE_STATX 0
+#endif
 
 static void debug(const char *fmt, ...)
 {
@@ -32,6 +39,7 @@ static void debug(const char *fmt, ...)
     va_start(ap, fmt);
     vfprintf(stderr, fmt, ap);
     va_end(ap);
+    //puts((USE_STATX == 1) ? "STATX ENABLED" : "STATX DISABLED");
 #else
     (void) fmt;
 #endif
@@ -53,7 +61,8 @@ enum sfakeroot_msg_type {
     SFAKEROOT_MSG_FCHOWN,
     SFAKEROOT_MSG_FCHOWNAT,
     SFAKEROOT_MSG_CHMOD,
-    SFAKEROOT_MSG_FINISH
+    SFAKEROOT_MSG_FINISH,
+    SFAKEROOT_MSG_STATX
 };
 
 struct sfakeroot_msg {
@@ -67,6 +76,7 @@ struct sfakeroot_msg {
     char path[MAX_PATHLEN];
     int fd;
     int flag;
+    unsigned int mask;
     struct stat st;
     uid_t uid;
     gid_t gid;
@@ -75,10 +85,14 @@ struct sfakeroot_msg {
     /* system call return data */
     int retcode;
     int reterrno;
+
+#if USE_STATX
+    struct statx statxbuf;
+#endif
 };
 
 int sfakeroot_recvmsg(int fd, struct sfakeroot_msg *m);
-int sfakeroot_sendmsg(int fd, struct sfakeroot_msg *m);
+int sfakeroot_sendmsg(int fd, struct sfakeroot_msg *m, int send_fds[], int send_fds_len);
 
 int sfakeroot_stat(const char *path, struct stat *s, bool lstat);
 bool sfakeroot_daemon_running(void);

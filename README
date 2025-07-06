@@ -1,25 +1,43 @@
 sfakeroot
 =========
 
-sfakeroot is a minimalist fakeroot[1]. It uses the same LD_PRELOAD tricks
-as fakeroot to provide an environment in which stat() and related calls
+sfakeroot is a minimalist fakeroot[1]. It uses LD_PRELOAD
+to provide an environment in which stat() and related calls
 return uid/gid 0, so that files appear to be owned by root even when they're
 not. Inside the fakeroot environment permissions can be modified as if the
 current user is root, though ownership of the underlying files is never
 really changed. Any permissions set within the fakeroot environment will
 last only for the duration of the session, once sfakeroot exits all changes
-are lost.
+are lost. If you need to preserve session state between calls you can tell sfakeroot to save the session to a file, which can be loaded again when sfakeroot runs. See man page for details.
 
 Why?
 ----
 
 sfakeroot was written because there is no OpenBSD compatible fakeroot
 equivalent, I considered porting fakeroot but it seemed too difficult.
+On Linux you will probably just use docker, but this could be a useful
+tool if docker is not an option.
+
+Currently supported calls
+--------------------------
+
+This is a list of calls that will currently be intercepted by sfakeroot:
+
+* stat
+* lstat
+* fstat
+* fstatat
+* chown
+* lchown
+* fchown
+* fchownat
+* chmod
+* statx
 
 Installation
 ------------
 
-To build just run:
+To build run:
 
     $ make
 
@@ -61,3 +79,9 @@ To make better use of sfakeroot on OpenBSD you may wish to use it with sbase[2].
 
 [1]: http://freshmeat.sourceforge.net/projects/fakeroot
 [2]: https://git.suckless.org/sbase/
+
+TODO
+----
+
+* Support fts and ftw functions.
+* Support fchmod fchmodat
